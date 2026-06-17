@@ -1,9 +1,9 @@
 {
-	"id": "paper-organization",
-	"name": "Paper Organization",
-	"version": "1.4.2",
+	"id": "treasure-hub",
+	"name": "Treasure Hub",
+	"version": "1.4.9",
 	"minAppVersion": "1.5.0",
-	"description": "Create paper summary Markdown notes from single or multiple PDF links, manage an animated paper dashboard, browse complete paper metadata, show paper cover images, open a reusable right-side native global graph filtered to the selected paper note and its direct Markdown relations, and switch between original or one user-imported custom dashboard CSS style.",
+	"description": "Create paper summary Markdown notes from PDF links, manage an animated paper dashboard, browse paper metadata, switch between the built-in default theme and complete Markdown CSS themes, and import/export settings via clipboard JSON or files with change preview.",
 	"author": "yuan",
 	"authorUrl": "",
 	"isDesktopOnly": false
