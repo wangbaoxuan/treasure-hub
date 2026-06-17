@@ -1,0 +1,10 @@
+{
+	"id": "paper-organization",
+	"name": "Paper Organization",
+	"version": "1.4.2",
+	"minAppVersion": "1.5.0",
+	"description": "Create paper summary Markdown notes from single or multiple PDF links, manage an animated paper dashboard, browse complete paper metadata, show paper cover images, open a reusable right-side native global graph filtered to the selected paper note and its direct Markdown relations, and switch between original or one user-imported custom dashboard CSS style.",
+	"author": "yuan",
+	"authorUrl": "",
+	"isDesktopOnly": false
+}
