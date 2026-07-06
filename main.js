@@ -8,9 +8,10 @@ const {
 	normalizePath,
 	TFile,
 	ItemView,
+	setIcon,
 } = require("obsidian");
 
-const VIEW_TYPE_PAPER_DASHBOARD = "treasure-hub-dashboard";
+const VIEW_TYPE_PAPER_DASHBOARD = "paper-organization-dashboard";
 
 const PAGE_DASHBOARD = "dashboard";
 const PAGE_LIBRARY = "library";
@@ -25,22 +26,17 @@ const PAPER_SEARCH_TYPES = [
 ];
 
 const STYLE_ORIGINAL = "original";
-const DEFAULT_CUSTOM_STYLE_FOLDER_PATH = "Treasure Hub/Themes";
-const CUSTOM_STYLE_ELEMENT_ID = "treasure-hub-custom-style";
-const BUILTIN_STYLE_ELEMENT_ID = "treasure-hub-builtin-style";
-const DEFAULT_THEME_FILE_NAME = "default-theme.css";
-const SETTINGS_EXPORT_SCHEMA_VERSION = 1;
-const SETTINGS_EXPORT_FILE_PREFIX = "treasure-hub-settings";
+const CUSTOM_STYLE_FOLDER_PATH = ".obsidian/plugins/paper-organization/user-styles";
+const CUSTOM_STYLE_ELEMENT_ID = "paper-organization-custom-style";
+
 const DEFAULT_SETTINGS = {
 	templatePath: "Templates/Paper Summary.md",
 	markdownFolderPath: "Papers/Summaries",
 	pdfFolderPath: "Papers/PDFs",
 
 	// Custom dashboard style settings.
-	// original = built-in styles only; otherwise this stores the path of a
-	// Markdown note inside customStyleFolderPath. The note must contain one or
-	// more fenced ```css code blocks.
-	customStyleFolderPath: DEFAULT_CUSTOM_STYLE_FOLDER_PATH,
+	// original = built-in styles only; otherwise this stores a .css path
+	// inside .obsidian/plugins/paper-organization/user-styles.
 	activeStylePath: STYLE_ORIGINAL,
 
 	// 是否在主页面 Dashboard 中展示 Overview 统计模块
@@ -57,7 +53,7 @@ read: false
 title:
 authors:
 labs:
-affiliation:
+affiliation: []
 arxiv:
 pdf_url:
 pdf:
@@ -86,12 +82,11 @@ the_truth:
 # 📰 Related Papers  
 `;
 
-module.exports = class TreasureHubPlugin extends Plugin {
+module.exports = class PaperOrganizationPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 
 		this.customStyleEl = null;
-		this.builtinStyleEl = null;
 		this.customStyleReloadTimer = null;
 		this.autoOpenDashboardTimer = null;
 		this.dashboardRefreshSuppressedUntil = 0;
@@ -109,13 +104,13 @@ module.exports = class TreasureHubPlugin extends Plugin {
 
 		this.openDashboardOnLayoutReady();
 
-		this.addRibbonIcon("library", "Open Treasure Hub Dashboard", async () => {
+		this.addRibbonIcon("library", "Open Paper Organization Dashboard", async () => {
 			await this.activateDashboard(PAGE_DASHBOARD);
 		});
 
 		this.addCommand({
-			id: "open-treasure-hub-dashboard",
-			name: "Open Treasure Hub Dashboard",
+			id: "open-paper-organization-dashboard",
+			name: "Open Paper Organization Dashboard",
 			callback: async () => {
 				await this.activateDashboard(PAGE_DASHBOARD);
 			},
@@ -131,39 +126,10 @@ module.exports = class TreasureHubPlugin extends Plugin {
 
 		this.addCommand({
 			id: "reload-active-custom-style",
-			name: "Reload active dashboard style from Markdown",
+			name: "Reload active custom style",
 			callback: async () => {
-				await this.refreshCustomStyleFiles();
 				await this.applyActiveStyle({ showNotice: true });
 				await this.refreshOpenDashboards();
-			},
-		});
-
-		this.addCommand({
-			id: "copy-treasure-hub-settings-json",
-			name: "Copy Treasure Hub settings JSON",
-			callback: async () => {
-				await this.exportSettingsToClipboard();
-			},
-		});
-
-		this.addCommand({
-			id: "import-treasure-hub-settings-from-json",
-			name: "Import Treasure Hub settings from pasted JSON",
-			callback: () => {
-				new PaperSettingsJsonImportModal(this.app, this, async (jsonText) => {
-					return await this.importSettingsFromJsonText(jsonText, {
-						sourceName: "pasted JSON",
-					});
-				}).open();
-			},
-		});
-
-		this.addCommand({
-			id: "export-treasure-hub-settings",
-			name: "Download Treasure Hub settings JSON file",
-			callback: () => {
-				this.exportSettingsToFile();
 			},
 		});
 
@@ -171,8 +137,8 @@ module.exports = class TreasureHubPlugin extends Plugin {
 			id: "import-paper-from-pdf-url",
 			name: "Import paper from PDF URL",
 			callback: () => {
-				new PaperImportModal(this.app, this, async (pdfUrl, downloadPdf) => {
-					await this.importPaper(pdfUrl, downloadPdf);
+				new PaperImportModal(this.app, this, async (pdfUrl) => {
+					await this.importPaper(pdfUrl, false);
 					await this.refreshOpenDashboards();
 				}).open();
 			},
@@ -182,8 +148,8 @@ module.exports = class TreasureHubPlugin extends Plugin {
 			id: "import-papers-from-pdf-urls",
 			name: "Import papers from PDF URLs",
 			callback: () => {
-				new PaperBatchImportModal(this.app, this, async (pdfUrls, downloadPdf, onProgress) => {
-					const result = await this.importPapers(pdfUrls, downloadPdf, onProgress);
+				new PaperBatchImportModal(this.app, this, async (pdfUrls, onProgress) => {
+					const result = await this.importPapers(pdfUrls, false, onProgress);
 					await this.refreshOpenDashboards();
 
 					return result;
@@ -191,7 +157,7 @@ module.exports = class TreasureHubPlugin extends Plugin {
 			},
 		});
 
-		this.settingTab = new TreasureHubSettingTab(this.app, this);
+		this.settingTab = new PaperOrganizationSettingTab(this.app, this);
 		this.addSettingTab(this.settingTab);
 
 		this.registerEvent(
@@ -249,7 +215,7 @@ module.exports = class TreasureHubPlugin extends Plugin {
 			this.autoOpenDashboardTimer = null;
 		}
 
-		this.removeInjectedStyles();
+		this.removeActiveCustomStyle();
 	}
 
 	openDashboardOnLayoutReady() {
@@ -265,7 +231,7 @@ module.exports = class TreasureHubPlugin extends Plugin {
 					await this.activateDashboard(PAGE_DASHBOARD);
 				} catch (error) {
 					console.error(
-						"treasure-hub: failed to open dashboard on startup",
+						"paper-organization: failed to open dashboard on startup",
 						error
 					);
 				}
@@ -362,22 +328,7 @@ module.exports = class TreasureHubPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		const loadedData = await this.loadData();
-		const baseData =
-			loadedData && typeof loadedData === "object" && Object.keys(loadedData).length > 0
-				? loadedData
-				: await this.loadLegacyPaperOrganizationSettings();
-
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, baseData || {});
-
-		try {
-			this.settings.customStyleFolderPath = sanitizeVaultFolderPath(
-				this.settings.customStyleFolderPath || DEFAULT_SETTINGS.customStyleFolderPath
-			) || DEFAULT_SETTINGS.customStyleFolderPath;
-		} catch (error) {
-			console.warn("treasure-hub: invalid custom style folder path", error);
-			this.settings.customStyleFolderPath = DEFAULT_SETTINGS.customStyleFolderPath;
-		}
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
 
 		if (!this.settings.activeStylePath) {
 			this.settings.activeStylePath = STYLE_ORIGINAL;
@@ -389,325 +340,27 @@ module.exports = class TreasureHubPlugin extends Plugin {
 		) {
 			this.settings.activeStylePath = STYLE_ORIGINAL;
 		}
+
+		delete this.settings.customStyleFolderPath;
 	}
 
 	async saveSettings() {
 		await this.saveData(this.settings);
 	}
 
-	async loadLegacyPaperOrganizationSettings() {
-		try {
-			const adapter = this.app && this.app.vault ? this.app.vault.adapter : null;
-			const legacyPath = ".obsidian/plugins/paper-organization/data.json";
-
-			if (!adapter || !(await adapter.exists(legacyPath))) {
-				return null;
-			}
-
-			const raw = await adapter.read(legacyPath);
-			const parsed = JSON.parse(raw);
-
-			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-				return null;
-			}
-
-			console.info("treasure-hub: loaded legacy Paper Organization settings as initial settings.");
-			return parsed;
-		} catch (error) {
-			console.warn("treasure-hub: failed to load legacy Paper Organization settings", error);
-			return null;
-		}
-	}
-
-	getExportableSettings(settings = this.settings) {
-		const source = settings || {};
-		return {
-			templatePath:
-				source.templatePath || DEFAULT_SETTINGS.templatePath,
-			markdownFolderPath:
-				source.markdownFolderPath || DEFAULT_SETTINGS.markdownFolderPath,
-			pdfFolderPath:
-				source.pdfFolderPath || DEFAULT_SETTINGS.pdfFolderPath,
-			customStyleFolderPath:
-				this.getCustomStyleFolderPathFromSettings(source),
-			activeStylePath:
-				source.activeStylePath || STYLE_ORIGINAL,
-			showDashboardOverview:
-				source.showDashboardOverview !== false,
-			showPaperLibraryImages:
-				source.showPaperLibraryImages !== false,
-		};
-	}
-
-	createSettingsExportPayload() {
-		return {
-			schemaVersion: SETTINGS_EXPORT_SCHEMA_VERSION,
-			pluginId: this.manifest && this.manifest.id ? this.manifest.id : "treasure-hub",
-			pluginName: this.manifest && this.manifest.name ? this.manifest.name : "Treasure Hub",
-			pluginVersion: this.manifest && this.manifest.version ? this.manifest.version : "",
-			exportedAt: new Date().toISOString(),
-			settings: this.getExportableSettings(),
-		};
-	}
-
-	createSettingsExportJson() {
-		return JSON.stringify(this.createSettingsExportPayload(), null, 2);
-	}
-
-	async exportSettingsToClipboard() {
-		const json = this.createSettingsExportJson();
-		const copied = await copyTextToClipboard(json);
-
-		if (copied) {
-			new Notice("Treasure Hub settings JSON copied to clipboard.");
-			return { copied: true, json };
-		}
-
-		new Notice("Clipboard copy is unavailable. Copy the JSON manually from the dialog.");
-		new PaperSettingsJsonExportModal(this.app, json).open();
-
-		return { copied: false, json };
-	}
-
-	exportSettingsToFile() {
-		const json = this.createSettingsExportJson();
-		const filename = `${SETTINGS_EXPORT_FILE_PREFIX}-${formatDateForFileName(Date.now())}.json`;
-
-		downloadTextFile(filename, json, "application/json");
-		new Notice(`Treasure Hub settings exported: ${filename}`);
-
-		return JSON.parse(json);
-	}
-
-	async importSettingsFromFile(file) {
-		if (!file) {
-			throw new Error("No settings JSON file selected.");
-		}
-
-		const fileName = String(file.name || "settings.json").trim();
-		if (fileName && !fileName.toLowerCase().endsWith(".json")) {
-			throw new Error("Please choose a .json settings export file.");
-		}
-
-		const text = await readBrowserFileAsText(file);
-		return await this.importSettingsFromJsonText(text, { sourceName: fileName });
-	}
-
-	parseSettingsExportJson(text) {
-		try {
-			return JSON.parse(String(text || ""));
-		} catch (error) {
-			throw new Error("The imported settings text is not valid JSON.");
-		}
-	}
-
-	getSettingsChangeList(previousSettings, nextSettings) {
-		const previous = previousSettings || {};
-		const next = nextSettings || {};
-		const keys = [
-			"templatePath",
-			"markdownFolderPath",
-			"pdfFolderPath",
-			"customStyleFolderPath",
-			"activeStylePath",
-			"showDashboardOverview",
-			"showPaperLibraryImages",
-		];
-
-		return keys
-			.filter((key) => previous[key] !== next[key])
-			.map((key) => ({
-				key,
-				label: this.getSettingsFieldLabel(key),
-				from: previous[key],
-				to: next[key],
-			}));
-	}
-
-	getSettingsFieldLabel(key) {
-		const labels = {
-			templatePath: "Paper summary template path",
-			markdownFolderPath: "Markdown output folder",
-			pdfFolderPath: "PDF download folder",
-			customStyleFolderPath: "Markdown theme folder",
-			activeStylePath: "Active dashboard style",
-			showDashboardOverview: "Show Overview on main page",
-			showPaperLibraryImages: "Show images in Paper Library",
-		};
-
-		return labels[key] || String(key || "Setting");
-	}
-
-	previewSettingsImportFromJsonText(text) {
-		const payload = this.parseSettingsExportJson(text);
-		const nextRawSettings = this.normalizeImportedSettingsPayload(payload);
-		const previousExportableSettings = this.getExportableSettings(this.settings);
-		const nextExportableSettings = this.getExportableSettings(nextRawSettings);
-
-		return {
-			previousSettings: previousExportableSettings,
-			settings: nextExportableSettings,
-			changes: this.getSettingsChangeList(
-				previousExportableSettings,
-				nextExportableSettings
-			),
-		};
-	}
-
-	async importSettingsFromJsonText(text, options = {}) {
-		const payload = this.parseSettingsExportJson(text);
-		const nextSettings = this.normalizeImportedSettingsPayload(payload);
-		const previousSettings = Object.assign({}, this.settings || {});
-		const previousExportableSettings = this.getExportableSettings(previousSettings);
-
-		this.settings = nextSettings;
-
-		await this.saveSettings();
-		await this.refreshCustomStyleFiles();
-		await this.applyActiveStyle();
-		await this.refreshOpenDashboards();
-
-		const nextExportableSettings = this.getExportableSettings(this.settings);
-		const activeStylePath = this.settings.activeStylePath || STYLE_ORIGINAL;
-		const activeStyleMissing =
-			activeStylePath !== STYLE_ORIGINAL &&
-			!this.getCustomStyleFiles().some((file) => file.path === activeStylePath);
-
-		return {
-			sourceName: options.sourceName || "settings export",
-			previousSettings,
-			previousExportableSettings,
-			settings: nextExportableSettings,
-			changes: this.getSettingsChangeList(
-				previousExportableSettings,
-				nextExportableSettings
-			),
-			activeStyleMissing,
-		};
-	}
-
-	normalizeImportedSettingsPayload(payload) {
-		if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-			throw new Error("Settings export must be a JSON object.");
-		}
-
-		const pluginId = String(payload.pluginId || payload.id || "").trim();
-		const currentPluginId =
-			this.manifest && this.manifest.id ? this.manifest.id : "treasure-hub";
-		const acceptedPluginIds = new Set([currentPluginId, "treasure-hub", "paper-organization"]);
-
-		if (pluginId && !acceptedPluginIds.has(pluginId)) {
-			throw new Error(`This settings file is for ${pluginId}, not ${currentPluginId}.`);
-		}
-
-		const source =
-			payload.settings && typeof payload.settings === "object" && !Array.isArray(payload.settings)
-				? payload.settings
-				: payload;
-
-		const next = Object.assign({}, DEFAULT_SETTINGS);
-
-		next.templatePath = this.normalizeImportedFilePath(
-			source.templatePath,
-			DEFAULT_SETTINGS.templatePath
-		);
-
-		next.markdownFolderPath = this.normalizeImportedFolderPath(
-			source.markdownFolderPath,
-			DEFAULT_SETTINGS.markdownFolderPath
-		);
-
-		next.pdfFolderPath = this.normalizeImportedFolderPath(
-			source.pdfFolderPath,
-			DEFAULT_SETTINGS.pdfFolderPath
-		);
-
-		next.customStyleFolderPath = this.normalizeImportedFolderPath(
-			source.customStyleFolderPath,
-			DEFAULT_SETTINGS.customStyleFolderPath
-		);
-
-		next.showDashboardOverview = source.showDashboardOverview !== false;
-		next.showPaperLibraryImages = source.showPaperLibraryImages !== false;
-		next.activeStylePath = this.normalizeImportedActiveStylePath(
-			source.activeStylePath,
-			next.customStyleFolderPath
-		);
-
-		return next;
-	}
-
-	normalizeImportedFilePath(value, fallback) {
-		try {
-			return sanitizeVaultFilePath(String(value || "").trim() || fallback) || fallback;
-		} catch (error) {
-			console.warn("treasure-hub: invalid imported file path", value, error);
-			return fallback;
-		}
-	}
-
-	normalizeImportedFolderPath(value, fallback) {
-		try {
-			return sanitizeVaultFolderPath(String(value || "").trim() || fallback) || fallback;
-		} catch (error) {
-			console.warn("treasure-hub: invalid imported folder path", value, error);
-			return fallback;
-		}
-	}
-
-	normalizeImportedActiveStylePath(value, customStyleFolderPath) {
-		const raw = String(value || STYLE_ORIGINAL).trim();
-
-		if (!raw || raw === STYLE_ORIGINAL) {
-			return STYLE_ORIGINAL;
-		}
-
-		try {
-			const safePath = sanitizeVaultFilePath(raw);
-			const safeFolder = sanitizeVaultFolderPath(customStyleFolderPath || "");
-
-			if (!safePath.toLowerCase().endsWith(".md")) {
-				return STYLE_ORIGINAL;
-			}
-
-			if (safeFolder && !safePath.startsWith(`${safeFolder}/`)) {
-				return STYLE_ORIGINAL;
-			}
-
-			return safePath;
-		} catch (error) {
-			console.warn("treasure-hub: invalid imported active style path", value, error);
-			return STYLE_ORIGINAL;
-		}
-	}
-
 	isOriginalStyleActive() {
 		return (this.settings.activeStylePath || STYLE_ORIGINAL) === STYLE_ORIGINAL;
 	}
 
-	getCustomStyleFolderPathFromSettings(settings = this.settings) {
-		try {
-			return sanitizeVaultFolderPath(
-				(settings && settings.customStyleFolderPath) || DEFAULT_SETTINGS.customStyleFolderPath
-			) || DEFAULT_SETTINGS.customStyleFolderPath;
-		} catch (_) {
-			return DEFAULT_SETTINGS.customStyleFolderPath;
-		}
-	}
-
 	getCustomStyleFolderPath() {
-		return this.getCustomStyleFolderPathFromSettings(this.settings);
+		return CUSTOM_STYLE_FOLDER_PATH;
 	}
 
 	isPathInsideCustomStyleFolder(path) {
 		const stylePath = sanitizeVaultFilePath(path);
 		const folder = this.getCustomStyleFolderPath();
 
-		if (!stylePath || !stylePath.toLowerCase().endsWith(".md")) {
-			return false;
-		}
-
-		return folder ? stylePath.startsWith(`${folder}/`) : true;
+		return stylePath.startsWith(`${folder}/`) && stylePath.toLowerCase().endsWith(".css");
 	}
 
 	getCustomStyleFiles() {
@@ -716,45 +369,52 @@ module.exports = class TreasureHubPlugin extends Plugin {
 
 	async refreshCustomStyleFiles() {
 		const folder = this.getCustomStyleFolderPath();
-		const styleFiles = [];
+		const adapter = this.app.vault.adapter;
 
 		try {
-			const files = this.app.vault.getMarkdownFiles().filter((file) => {
-				if (!(file instanceof TFile)) return false;
-				if (!folder) return true;
-				return file.path.startsWith(`${folder}/`);
-			});
+			const exists = await adapter.exists(folder);
 
-			for (const file of files) {
-				let markdown = "";
+			if (!exists) {
+				this.customStyleFiles = [];
+				return this.customStyleFiles;
+			}
+
+			const listed = await adapter.list(folder);
+			const files = Array.isArray(listed && listed.files) ? listed.files : [];
+			const styleFiles = [];
+
+			for (const path of files) {
+				const safePath = sanitizeVaultFilePath(path);
+
+				if (!safePath.toLowerCase().endsWith(".css")) {
+					continue;
+				}
+
+				if (!this.isPathInsideCustomStyleFolder(safePath)) {
+					continue;
+				}
+
+				let stat = null;
 
 				try {
-					markdown = await this.app.vault.read(file);
-				} catch (error) {
-					console.warn(`treasure-hub: failed to read style note ${file.path}`, error);
-					continue;
-				}
+					if (typeof adapter.stat === "function") {
+						stat = await adapter.stat(safePath);
+					}
+				} catch (_) {}
 
-				const cssBlocks = extractCssCodeBlocks(markdown);
-
-				if (cssBlocks.length === 0) {
-					continue;
-				}
-
-				const cssSize = cssBlocks.reduce((total, block) => total + block.length, 0);
+				const name = safePath.split("/").pop() || safePath;
+				const basename = name.replace(/\.css$/i, "");
 
 				styleFiles.push({
-					path: file.path,
-					name: file.name,
-					basename: file.basename,
-					extension: "md",
-					cssBlockCount: cssBlocks.length,
-					cssSize,
+					path: safePath,
+					name,
+					basename,
+					extension: "css",
 					stat: Object.assign({
 						size: 0,
 						mtime: 0,
 						ctime: 0,
-					}, file.stat || {}),
+					}, stat || {}),
 				});
 			}
 
@@ -763,7 +423,7 @@ module.exports = class TreasureHubPlugin extends Plugin {
 
 			return styleFiles;
 		} catch (error) {
-			console.warn("treasure-hub: failed to scan Markdown style folder", error);
+			console.warn("paper-organization: failed to scan custom style folder", error);
 			this.customStyleFiles = [];
 			return this.customStyleFiles;
 		}
@@ -785,26 +445,6 @@ module.exports = class TreasureHubPlugin extends Plugin {
 		return `Missing: ${activeStylePath}`;
 	}
 
-	async setCustomStyleFolderPath(folderPath) {
-		const nextFolder = sanitizeVaultFolderPath(
-			String(folderPath || "").trim() || DEFAULT_SETTINGS.customStyleFolderPath
-		) || DEFAULT_SETTINGS.customStyleFolderPath;
-
-		this.settings.customStyleFolderPath = nextFolder;
-
-		if (
-			this.settings.activeStylePath !== STYLE_ORIGINAL &&
-			!this.isPathInsideCustomStyleFolder(this.settings.activeStylePath)
-		) {
-			this.settings.activeStylePath = STYLE_ORIGINAL;
-		}
-
-		await this.saveSettings();
-		await this.refreshCustomStyleFiles();
-		await this.applyActiveStyle();
-		await this.refreshOpenDashboards();
-	}
-
 	async setActiveStyle(stylePath, options = {}) {
 		const requestedStyle = String(stylePath || STYLE_ORIGINAL).trim();
 		let nextStyle = STYLE_ORIGINAL;
@@ -814,7 +454,7 @@ module.exports = class TreasureHubPlugin extends Plugin {
 
 			if (!this.isPathInsideCustomStyleFolder(safePath)) {
 				throw new Error(
-					`Markdown style notes must be stored in ${this.getCustomStyleFolderPath()} and end with .md.`
+					`Custom styles must be stored in ${this.getCustomStyleFolderPath()}.`
 				);
 			}
 
@@ -830,58 +470,6 @@ module.exports = class TreasureHubPlugin extends Plugin {
 		await this.refreshOpenDashboards();
 	}
 
-	removeBuiltinStyle() {
-		if (this.builtinStyleEl instanceof HTMLStyleElement) {
-			this.builtinStyleEl.remove();
-		}
-
-		const existing = document.getElementById(BUILTIN_STYLE_ELEMENT_ID);
-		if (existing instanceof HTMLStyleElement) {
-			existing.remove();
-		}
-
-		this.builtinStyleEl = null;
-	}
-
-	getBundledDefaultThemePath() {
-		const manifestDir =
-			this.manifest && this.manifest.dir
-				? this.manifest.dir
-				: `.obsidian/plugins/${this.manifest && this.manifest.id ? this.manifest.id : "treasure-hub"}`;
-
-		return normalizePath(`${manifestDir}/${DEFAULT_THEME_FILE_NAME}`);
-	}
-
-	async readBundledDefaultThemeCss() {
-		const themePath = this.getBundledDefaultThemePath();
-		const adapter = this.app.vault.adapter;
-
-		if (!(await adapter.exists(themePath))) {
-			throw new Error(`Bundled default theme file not found: ${themePath}`);
-		}
-
-		return await adapter.read(themePath);
-	}
-
-	async injectBuiltinStyle() {
-		this.removeBuiltinStyle();
-
-		const css = String(await this.readBundledDefaultThemeCss()).trim();
-		if (!css) {
-			return false;
-		}
-
-		const styleEl = document.createElement("style");
-		styleEl.id = BUILTIN_STYLE_ELEMENT_ID;
-		styleEl.dataset.paperOrganizationStylePath = STYLE_ORIGINAL;
-		styleEl.dataset.paperOrganizationThemeSource = this.getBundledDefaultThemePath();
-		styleEl.textContent = `/* Treasure Hub default theme: ${this.getBundledDefaultThemePath()} */\n${css}`;
-		document.head.appendChild(styleEl);
-		this.builtinStyleEl = styleEl;
-
-		return true;
-	}
-
 	removeActiveCustomStyle() {
 		if (this.customStyleEl instanceof HTMLStyleElement) {
 			this.customStyleEl.remove();
@@ -895,33 +483,14 @@ module.exports = class TreasureHubPlugin extends Plugin {
 		this.customStyleEl = null;
 	}
 
-	removeInjectedStyles() {
-		this.removeBuiltinStyle();
-		this.removeActiveCustomStyle();
-	}
-
-	async applyOriginalStyleFallback(options = {}, message = "Treasure Hub style: Original") {
-		this.removeInjectedStyles();
-		await this.injectBuiltinStyle();
-
-		if (options.showNotice) {
-			new Notice(message);
-		}
-	}
-
 	async applyActiveStyle(options = {}) {
-		// styles.css only contains small, non-theme base UI. The dashboard/library
-		// theme itself is injected here:
-		// - Original: read and inject bundled default-theme.css.
-		// - Markdown theme: inject only fenced ```css blocks from the selected .md note.
-		this.removeInjectedStyles();
+		this.removeActiveCustomStyle();
 
 		const activeStylePath = this.settings.activeStylePath || STYLE_ORIGINAL;
 
 		if (activeStylePath === STYLE_ORIGINAL) {
-			await this.injectBuiltinStyle();
 			if (options.showNotice) {
-				new Notice("Treasure Hub style: Original");
+				new Notice("Paper Organization style: Original");
 			}
 			return true;
 		}
@@ -931,63 +500,61 @@ module.exports = class TreasureHubPlugin extends Plugin {
 		try {
 			safeStylePath = sanitizeVaultFilePath(activeStylePath);
 		} catch (error) {
-			console.warn("treasure-hub: invalid Markdown style path", error);
-			await this.applyOriginalStyleFallback(
-				options,
-				"Markdown style path is invalid. Original style is being used."
-			);
+			console.warn("paper-organization: invalid custom style path", error);
+			if (options.showNotice) {
+				new Notice("Custom style path is invalid. Original style is being used.");
+			}
 			return false;
 		}
 
 		if (!this.isPathInsideCustomStyleFolder(safeStylePath)) {
-			await this.applyOriginalStyleFallback(
-				options,
-				`Markdown style notes must be stored in ${this.getCustomStyleFolderPath()}. Original style is being used.`
-			);
+			if (options.showNotice) {
+				new Notice(
+					`Custom styles must be stored in ${this.getCustomStyleFolderPath()}. Original style is being used.`
+				);
+			}
 			return false;
 		}
 
 		try {
-			const file = this.app.vault.getAbstractFileByPath(safeStylePath);
+			const exists = await this.app.vault.adapter.exists(safeStylePath);
 
-			if (!(file instanceof TFile)) {
-				await this.applyOriginalStyleFallback(
-					options,
-					"Markdown style note not found. Original style is being used."
-				);
+			if (!exists) {
+				if (options.showNotice) {
+					new Notice("Custom style file not found. Original style is being used.");
+				}
 				return false;
 			}
 
-			const markdown = await this.app.vault.read(file);
-			const css = buildCssFromMarkdownStyleNote(safeStylePath, markdown);
+			const css = await this.app.vault.adapter.read(safeStylePath);
 			const styleEl = document.createElement("style");
 			styleEl.id = CUSTOM_STYLE_ELEMENT_ID;
 			styleEl.dataset.paperOrganizationStylePath = safeStylePath;
-			styleEl.dataset.paperOrganizationReplacesBuiltinStyle = "true";
-			styleEl.textContent = `/* Treasure Hub Markdown replacement style: ${safeStylePath} */\n${css}`;
+			styleEl.textContent = `/* Paper Organization custom style: ${safeStylePath} */\n${css}`;
 			document.head.appendChild(styleEl);
 			this.customStyleEl = styleEl;
 
-			const activeFile = this.getCustomStyleFiles().find((item) => item.path === safeStylePath);
+			const activeFile = this.getCustomStyleFiles().find((file) => file.path === safeStylePath);
 
 			if (options.showNotice) {
 				new Notice(
-					`Treasure Hub style: ${
-						(activeFile && (activeFile.basename || activeFile.name)) || file.basename || safeStylePath
-					} (Markdown theme)`
+					`Paper Organization style: ${
+						(activeFile && (activeFile.basename || activeFile.name)) || safeStylePath
+					}`
 				);
 			}
 
 			return true;
 		} catch (error) {
-			console.error("treasure-hub: failed to load Markdown style", error);
+			console.error("paper-organization: failed to load custom style", error);
 
-			await this.applyOriginalStyleFallback(
-				options,
-				`Failed to load Markdown style. Original style is being used: ${
-					error && error.message ? error.message : String(error)
-				}`
-			);
+			if (options.showNotice) {
+				new Notice(
+					`Failed to load custom style: ${
+						error && error.message ? error.message : String(error)
+					}`
+				);
+			}
 
 			return false;
 		}
@@ -1015,7 +582,7 @@ module.exports = class TreasureHubPlugin extends Plugin {
 			return false;
 		}
 
-		if (!stylePath || !stylePath.toLowerCase().endsWith(".md")) {
+		if (!stylePath || !stylePath.toLowerCase().endsWith(".css")) {
 			return false;
 		}
 
@@ -1044,7 +611,7 @@ module.exports = class TreasureHubPlugin extends Plugin {
 			oldPath &&
 			this.settings.activeStylePath === oldPath &&
 			file instanceof TFile &&
-			String(file.extension || "").toLowerCase() === "md" &&
+			String(file.extension || "").toLowerCase() === "css" &&
 			this.isPathInsideCustomStyleFolder(file.path)
 		) {
 			this.settings.activeStylePath = file.path;
@@ -1056,59 +623,30 @@ module.exports = class TreasureHubPlugin extends Plugin {
 
 	async importCustomStyleFile(file) {
 		if (!file) {
-			throw new Error("No CSS or Markdown file selected.");
+			throw new Error("No CSS file selected.");
 		}
 
-		const originalName = String(file.name || "custom-style.md").trim();
-		const lowerName = originalName.toLowerCase();
+		const originalName = String(file.name || "custom-style.css").trim();
 
-		if (!lowerName.endsWith(".css") && !lowerName.endsWith(".md")) {
-			throw new Error("Please choose a .css or .md file.");
+		if (!originalName.toLowerCase().endsWith(".css")) {
+			throw new Error("Please choose a .css file.");
 		}
 
 		const content = await readBrowserFileAsText(file);
 		const folder = this.getCustomStyleFolderPath();
 		await ensureAdapterFolder(this.app, folder);
 
-		const baseName = originalName.replace(/\.(css|md)$/i, "") || "custom-style";
+		const baseName = originalName.replace(/\.css$/i, "") || "custom-style";
 		const stylePath = await getAvailableAdapterPath(
 			this.app,
 			folder,
 			sanitizeFileName(baseName, 80),
-			"md"
+			"css"
 		);
-
-		let markdownContent = content;
-
-		if (lowerName.endsWith(".css")) {
-			markdownContent = `# ${baseName}\n\n\`\`\`css\n${content.trim()}\n\`\`\`\n`;
-		} else if (extractCssCodeBlocks(content).length === 0) {
-			throw new Error("The selected Markdown file does not contain a fenced ```css code block.");
-		}
-
-		await this.app.vault.adapter.write(stylePath, markdownContent);
-		await this.refreshCustomStyleFiles();
-		await this.setActiveStyle(stylePath, { showNotice: false });
-
-		return stylePath;
-	}
-
-	async createSampleCustomStyleNote() {
-		const folder = this.getCustomStyleFolderPath();
-		await ensureAdapterFolder(this.app, folder);
-
-		const stylePath = await getAvailableAdapterPath(
-			this.app,
-			folder,
-			"Soft Paper Theme",
-			"md"
-		);
-
-		const content = `# Soft Paper Theme\n\nEdit the CSS block below, then use Treasure Hub settings to refresh and enable this note.\n\n\`\`\`css\n.paper-dashboard-title {\n\tletter-spacing: -0.045em;\n}\n\n.paper-dashboard-section,\n.paper-library-card,\n.paper-navigation-card {\n\tborder-radius: 22px;\n}\n\n.paper-page-header {\n\tbackground:\n\t\tlinear-gradient(135deg, rgba(var(--interactive-accent-rgb), 0.16), transparent 42%),\n\t\tvar(--background-secondary);\n}\n\`\`\`\n`;
 
 		await this.app.vault.adapter.write(stylePath, content);
 		await this.refreshCustomStyleFiles();
-		await this.setActiveStyle(stylePath, { showNotice: true });
+		await this.setActiveStyle(stylePath, { showNotice: false });
 
 		return stylePath;
 	}
@@ -1146,7 +684,7 @@ module.exports = class TreasureHubPlugin extends Plugin {
 				metadata.arxiv = arxivMetadata.arxiv || arxivId;
 			} catch (error) {
 				console.warn(
-					"treasure-hub: arXiv metadata request failed; falling back to URL metadata.",
+					"paper-organization: arXiv metadata request failed; falling back to URL metadata.",
 					error
 				);
 			}
@@ -1211,7 +749,7 @@ module.exports = class TreasureHubPlugin extends Plugin {
 				title: metadata.title,
 				authors: metadata.authors,
 				labs: [],
-				affiliation: "",
+				affiliation: [],
 				arxiv: metadata.arxiv,
 				pdf_url: cleanedUrl,
 				pdf: pdfValue,
@@ -1259,7 +797,7 @@ module.exports = class TreasureHubPlugin extends Plugin {
 				});
 			} catch (error) {
 				console.error(
-					`treasure-hub: failed to import paper from ${url}`,
+					`paper-organization: failed to import paper from ${url}`,
 					error
 				);
 
@@ -1508,7 +1046,7 @@ module.exports = class TreasureHubPlugin extends Plugin {
 			);
 		} catch (error) {
 			console.error(
-				"treasure-hub: failed to open or update global graph",
+				"paper-organization: failed to open or update global graph",
 				error
 			);
 
@@ -1945,7 +1483,7 @@ module.exports = class TreasureHubPlugin extends Plugin {
 			return true;
 		} catch (error) {
 			console.warn(
-				"treasure-hub: failed to set graph search input",
+				"paper-organization: failed to set graph search input",
 				error
 			);
 			return false;
@@ -2340,7 +1878,7 @@ module.exports = class TreasureHubPlugin extends Plugin {
 			try {
 				this.app.workspace.setActiveLeaf(leaf, true, true);
 			} catch (error) {
-				console.warn("treasure-hub: failed to set active leaf", error);
+				console.warn("paper-organization: failed to set active leaf", error);
 			}
 		}
 	}
@@ -2511,7 +2049,7 @@ module.exports = class TreasureHubPlugin extends Plugin {
 
 			return true;
 		} catch (error) {
-			console.error("treasure-hub: failed to delete paper", error);
+			console.error("paper-organization: failed to delete paper", error);
 			new Notice(
 				`Failed to delete paper note: ${
 					error && error.message ? error.message : String(error)
@@ -2581,7 +2119,7 @@ class PaperDashboardView extends ItemView {
 	getDisplayText() {
 		return this.page === PAGE_LIBRARY
 			? "Paper Library"
-			: "Treasure Hub Dashboard";
+			: "Paper Organization Dashboard";
 	}
 
 	getIcon() {
@@ -2643,6 +2181,13 @@ class PaperDashboardView extends ItemView {
 		this.removeInvalidFilterSelections();
 		this.applyFilters();
 		this.render();
+	}
+
+	openPaperImportModal() {
+		new PaperImportModal(this.app, this.plugin, async (pdfUrl) => {
+			await this.plugin.importPaper(pdfUrl, false);
+			await this.plugin.refreshOpenDashboards();
+		}).open();
 	}
 
 	buildIndexes() {
@@ -2761,12 +2306,13 @@ class PaperDashboardView extends ItemView {
 			root.dataset.paperActiveStyle = "original";
 		}
 
-		this.renderPageHeader(root);
-
 		if (this.page === PAGE_LIBRARY) {
+			this.renderPageHeader(root);
 			this.renderPaperLibrary(root);
 			this.renderFilteredResults();
 			this.updateFilterChrome();
+		} else {
+			this.renderDashboardHome(root);
 		}
 
 		this.decorateAnimatedElements(root);
@@ -2777,7 +2323,7 @@ class PaperDashboardView extends ItemView {
 
 		const targets = Array.from(
 			root.querySelectorAll(
-				".paper-page-header, .paper-dashboard-section, .paper-library-card"
+				".paper-page-header, .paper-dashboard-section, .paper-library-card, .paper-dashboard-hub-entry"
 			)
 		);
 
@@ -2810,7 +2356,27 @@ class PaperDashboardView extends ItemView {
 		});
 
 		if (this.page === PAGE_LIBRARY) {
-			const backButton = header.createEl("button", {
+			const actions = header.createDiv({
+				cls: "paper-page-header-actions",
+			});
+
+			const addButton = actions.createEl("button", {
+				cls: "paper-page-add-button",
+			});
+
+			addButton.type = "button";
+			addButton.setAttribute("aria-label", "Add paper");
+			addButton.title = "Add paper";
+			setIcon(addButton, "plus");
+			addButton.createSpan({
+				text: "Add Paper",
+				cls: "paper-page-add-button-label",
+			});
+			addButton.addEventListener("click", () => {
+				this.openPaperImportModal();
+			});
+
+			const backButton = actions.createEl("button", {
 				cls: "paper-page-back-button",
 			});
 
@@ -2821,6 +2387,11 @@ class PaperDashboardView extends ItemView {
 				await this.setPage(PAGE_DASHBOARD);
 			});
 		} else {
+			titleWrap.createDiv({
+				text: "Browse, import, and revisit every paper in your hub.",
+				cls: "paper-page-subtitle",
+			});
+
 			title.addClass("is-clickable");
 			title.setAttribute("role", "button");
 			title.setAttribute("tabindex", "0");
@@ -2839,6 +2410,36 @@ class PaperDashboardView extends ItemView {
 				await openLibrary(event);
 			});
 		}
+	}
+
+	renderDashboardHome(root) {
+		const home = root.createDiv({
+			cls: "paper-dashboard-home paper-dashboard-hub-home",
+		});
+
+		const hubTitle = home.createEl("h1", {
+			text: "Treasure Hub",
+			cls: "paper-dashboard-hub-entry",
+		});
+
+		hubTitle.setAttribute("role", "button");
+		hubTitle.setAttribute("tabindex", "0");
+		hubTitle.setAttribute("aria-label", "Open Paper Library");
+		hubTitle.title = "Open Paper Library";
+
+		const openLibrary = async (event) => {
+			if (event) {
+				event.preventDefault();
+				event.stopPropagation();
+			}
+			await this.setPage(PAGE_LIBRARY);
+		};
+
+		hubTitle.addEventListener("click", openLibrary);
+		hubTitle.addEventListener("keydown", async (event) => {
+			if (event.key !== "Enter" && event.key !== " ") return;
+			await openLibrary(event);
+		});
 	}
 
 	renderNavigationModule(root) {
@@ -2912,17 +2513,6 @@ class PaperDashboardView extends ItemView {
 			cls: "paper-dashboard-import-controls",
 		});
 
-		const checkboxLabel = controls.createEl("label", {
-			cls: "paper-dashboard-checkbox-label",
-		});
-
-		const checkbox = checkboxLabel.createEl("input");
-		checkbox.type = "checkbox";
-
-		checkboxLabel.createSpan({
-			text: "Download PDF locally",
-		});
-
 		const button = controls.createEl("button", {
 			text: "Import Paper",
 			cls: "mod-cta",
@@ -2940,14 +2530,13 @@ class PaperDashboardView extends ItemView {
 				button.disabled = true;
 				button.setText("Importing paper...");
 
-				await this.plugin.importPaper(url, checkbox.checked);
+				await this.plugin.importPaper(url, false);
 
 				input.value = "";
-				checkbox.checked = false;
 
 				await this.refreshDataAndRender();
 			} catch (error) {
-				console.error("treasure-hub: failed to import paper", error);
+				console.error("paper-organization: failed to import paper", error);
 
 				new Notice(
 					`Paper import failed: ${
@@ -3991,7 +3580,7 @@ class PaperDashboardView extends ItemView {
 			try {
 				updater();
 			} catch (error) {
-				console.warn("treasure-hub: filter chrome update failed", error);
+				console.warn("paper-organization: filter chrome update failed", error);
 			}
 		}
 
@@ -4712,333 +4301,20 @@ class PaperImagePreviewModal extends Modal {
 	}
 }
 
-
-class PaperSettingsJsonExportModal extends Modal {
-	constructor(app, jsonText) {
-		super(app);
-		this.jsonText = String(jsonText || "");
-	}
-
-	onOpen() {
-		const { contentEl } = this;
-		contentEl.empty();
-		contentEl.addClass("paper-organization-modal");
-		contentEl.addClass("paper-settings-json-modal");
-
-		contentEl.createEl("h2", { text: "Copy settings JSON" });
-
-		contentEl.createEl("p", {
-			text:
-				"Clipboard access was not available. Select and copy the JSON below manually, then paste it into another vault when importing.",
-			cls: "paper-organization-desc",
-		});
-
-		const field = contentEl.createDiv({
-			cls: "paper-organization-field",
-		});
-
-		field.createEl("label", {
-			text: "Settings JSON",
-			cls: "paper-organization-label",
-		});
-
-		const textarea = field.createEl("textarea", {
-			cls: "paper-organization-json-textarea",
-		});
-
-		textarea.value = this.jsonText;
-		textarea.rows = 14;
-		textarea.spellcheck = false;
-		textarea.addEventListener("focus", () => textarea.select());
-
-		const actions = contentEl.createDiv({
-			cls: "paper-organization-button-row",
-		});
-
-		new Setting(actions)
-			.addButton((button) => {
-				button.setButtonText("Close").onClick(() => this.close());
-			})
-			.addButton((button) => {
-				button
-					.setButtonText("Copy again")
-					.setCta()
-					.onClick(async () => {
-						const copied = await copyTextToClipboard(this.jsonText);
-
-						if (copied) {
-							new Notice("Settings JSON copied to clipboard.");
-							this.close();
-							return;
-						}
-
-						textarea.focus();
-						textarea.select();
-						new Notice("Clipboard copy is still unavailable. Copy the selected text manually.");
-					});
-			});
-
-		window.setTimeout(() => {
-			textarea.focus();
-			textarea.select();
-		}, 50);
-	}
-
-	onClose() {
-		this.contentEl.empty();
-		this.contentEl.removeClass("paper-settings-json-modal");
-	}
-}
-
-class PaperSettingsJsonImportModal extends Modal {
-	constructor(app, plugin, onSubmit, onSuccess) {
-		super(app);
-		this.plugin = plugin;
-		this.onSubmit = onSubmit;
-		this.onSuccess = onSuccess;
-		this.jsonText = "";
-	}
-
-	onOpen() {
-		const { contentEl } = this;
-		contentEl.empty();
-		contentEl.addClass("paper-organization-modal");
-		contentEl.addClass("paper-settings-json-modal");
-
-		contentEl.createEl("h2", { text: "Import settings from JSON" });
-
-		contentEl.createEl("p", {
-			text:
-				"Paste a Treasure Hub settings JSON export below. The changed settings will be previewed before import.",
-			cls: "paper-organization-desc",
-		});
-
-		const field = contentEl.createDiv({
-			cls: "paper-organization-field",
-		});
-
-		field.createEl("label", {
-			text: "Pasted JSON",
-			cls: "paper-organization-label",
-		});
-
-		const textarea = field.createEl("textarea", {
-			cls: "paper-organization-json-textarea",
-		});
-
-		textarea.placeholder = `{
-  "schemaVersion": ${SETTINGS_EXPORT_SCHEMA_VERSION},
-  "pluginId": "treasure-hub",
-  "settings": {
-    "templatePath": "Templates/Paper Summary.md"
-  }
-}`;
-		textarea.rows = 14;
-		textarea.spellcheck = false;
-		textarea.value = this.jsonText;
-
-		const previewEl = field.createDiv({
-			cls: "paper-settings-import-preview",
-		});
-
-		const helper = field.createDiv({
-			cls: "paper-organization-desc paper-organization-inline-desc",
-		});
-		helper.setText("Only settings are imported. Paper notes, PDFs, and Markdown theme note contents are not embedded in the JSON.");
-
-		const updatePreview = () => {
-			this.jsonText = textarea.value;
-			this.renderImportPreview(previewEl, this.jsonText);
-		};
-
-		textarea.addEventListener("input", updatePreview);
-		this.renderImportPreview(previewEl, this.jsonText);
-
-		const actions = contentEl.createDiv({
-			cls: "paper-organization-button-row",
-		});
-
-		new Setting(actions)
-			.addButton((button) => {
-				button.setButtonText("Cancel").onClick(() => this.close());
-			})
-			.addButton((button) => {
-				button.setButtonText("Read clipboard").onClick(async () => {
-					try {
-						const text = await readTextFromClipboard();
-
-						if (!text) {
-							new Notice("Clipboard is empty or unavailable. Paste the JSON manually.");
-							return;
-						}
-
-						this.jsonText = text;
-						textarea.value = text;
-						updatePreview();
-						textarea.focus();
-						new Notice("Clipboard JSON pasted into the import box.");
-					} catch (error) {
-						new Notice("Clipboard read is unavailable. Paste the JSON manually.");
-					}
-				});
-			})
-			.addButton((button) => {
-				button
-					.setButtonText("Import")
-					.setCta()
-					.onClick(async () => {
-						const text = String(this.jsonText || textarea.value || "").trim();
-
-						if (!text) {
-							new Notice("Please paste a settings JSON export first.");
-							return;
-						}
-
-						try {
-							button.setDisabled(true);
-							button.setButtonText("Importing...");
-
-							const result = await this.onSubmit(text);
-							const changes = result && Array.isArray(result.changes) ? result.changes : [];
-
-							new Notice(
-								result && result.activeStyleMissing
-									? "Settings imported. Active Markdown theme is missing in this vault, so Original is being shown until the theme note exists."
-									: `Treasure Hub settings imported${changes.length ? ` (${changes.length} change${changes.length === 1 ? "" : "s"})` : ""}.`
-							);
-
-							if (typeof this.onSuccess === "function") {
-								this.onSuccess(result);
-							}
-
-							this.close();
-						} catch (error) {
-							console.error("treasure-hub: failed to import pasted settings JSON", error);
-							new Notice(
-								`Failed to import settings: ${
-									error && error.message ? error.message : String(error)
-								}`
-							);
-
-							button.setDisabled(false);
-							button.setButtonText("Import");
-						}
-					});
-			});
-
-		window.setTimeout(() => textarea.focus(), 50);
-	}
-
-	renderImportPreview(containerEl, jsonText) {
-		containerEl.empty();
-
-		const text = String(jsonText || "").trim();
-		if (!text) {
-			containerEl.addClass("is-empty");
-			containerEl.removeClass("is-error");
-			containerEl.createDiv({
-				text: "Paste JSON to preview which settings will change.",
-				cls: "paper-settings-import-preview-empty",
-			});
-			return;
-		}
-
-		containerEl.removeClass("is-empty");
-
-		let preview = null;
-		try {
-			preview = this.plugin.previewSettingsImportFromJsonText(text);
-		} catch (error) {
-			containerEl.addClass("is-error");
-			containerEl.createDiv({
-				text: "Preview unavailable",
-				cls: "paper-settings-import-preview-title",
-			});
-			containerEl.createDiv({
-				text: error && error.message ? error.message : String(error),
-				cls: "paper-settings-import-preview-error",
-			});
-			return;
-		}
-
-		containerEl.removeClass("is-error");
-		const changes = preview && Array.isArray(preview.changes) ? preview.changes : [];
-
-		containerEl.createDiv({
-			text: changes.length
-				? `Settings that will change (${changes.length})`
-				: "No setting values will change",
-			cls: "paper-settings-import-preview-title",
-		});
-
-		if (changes.length === 0) {
-			containerEl.createDiv({
-				text: "The pasted JSON matches the current plugin settings after normalization.",
-				cls: "paper-settings-import-preview-empty",
-			});
-			return;
-		}
-
-		const header = containerEl.createDiv({
-			cls: "paper-settings-import-change-row paper-settings-import-change-header",
-		});
-		header.createDiv({ text: "Setting" });
-		header.createDiv({ text: "Current" });
-		header.createDiv({ text: "Imported" });
-
-		const list = containerEl.createDiv({
-			cls: "paper-settings-import-change-list",
-		});
-
-		for (const change of changes) {
-			const row = list.createDiv({
-				cls: "paper-settings-import-change-row",
-			});
-
-			row.createDiv({
-				text: change.label || change.key || "Setting",
-				cls: "paper-settings-import-change-label",
-			});
-
-			row.createDiv({
-				text: this.formatPreviewValue(change.from),
-				cls: "paper-settings-import-change-value is-from",
-			});
-
-			row.createDiv({
-				text: this.formatPreviewValue(change.to),
-				cls: "paper-settings-import-change-value is-to",
-			});
-		}
-	}
-
-	formatPreviewValue(value) {
-		if (value === true) return "Enabled";
-		if (value === false) return "Disabled";
-		if (value === STYLE_ORIGINAL) return "Original";
-		if (value === null || value === undefined || value === "") return "(empty)";
-		return String(value);
-	}
-
-	onClose() {
-		this.contentEl.empty();
-		this.contentEl.removeClass("paper-settings-json-modal");
-	}
-}
-
 class PaperImportModal extends Modal {
 	constructor(app, plugin, onSubmit) {
 		super(app);
 		this.plugin = plugin;
 		this.onSubmit = onSubmit;
 		this.pdfUrl = "";
-		this.downloadPdf = false;
 	}
 
 	onOpen() {
 		const { contentEl } = this;
 		contentEl.empty();
+		this.modalEl.addClass("paper-import-modal-container");
 		contentEl.addClass("paper-organization-modal");
+		contentEl.addClass("paper-import-modal");
 
 		contentEl.createEl("h2", { text: "Import Paper from PDF URL" });
 
@@ -5060,62 +4336,56 @@ class PaperImportModal extends Modal {
 				text.inputEl.addClass("paper-organization-url-input");
 			});
 
-		new Setting(contentEl)
-			.setName("Download PDF locally")
-			.setDesc(
-				"When enabled, the PDF will be saved to the configured PDF folder and linked in the pdf field."
-			)
-			.addToggle((toggle) => {
-				toggle.setValue(this.downloadPdf).onChange((value) => {
-					this.downloadPdf = value;
-				});
-			});
-
 		const buttonRow = contentEl.createDiv({
-			cls: "paper-organization-button-row",
+			cls: "paper-organization-button-row paper-import-actions",
 		});
 
-		new Setting(buttonRow)
-			.addButton((button) => {
-				button.setButtonText("Cancel").onClick(() => this.close());
-			})
-			.addButton((button) => {
-				button
-					.setButtonText("Import")
-					.setCta()
-					.onClick(async () => {
-						const url = String(this.pdfUrl || "").trim();
+		const cancelButton = buttonRow.createEl("button", {
+			text: "Cancel",
+			cls: "paper-import-cancel-button",
+		});
+		cancelButton.type = "button";
+		cancelButton.addEventListener("click", () => this.close());
 
-						if (!url) {
-							new Notice("Please enter a paper PDF URL.");
-							return;
-						}
+		const importButton = buttonRow.createEl("button", {
+			text: "Import",
+			cls: "paper-import-submit-button mod-cta",
+		});
+		importButton.type = "button";
+		importButton.addEventListener("click", async () => {
+			const url = String(this.pdfUrl || "").trim();
 
-						try {
-							button.setDisabled(true);
-							button.setButtonText("Importing...");
-							await this.onSubmit(url, this.downloadPdf);
-							this.close();
-						} catch (error) {
-							console.error(
-								"treasure-hub: failed to import paper",
-								error
-							);
+			if (!url) {
+				new Notice("Please enter a paper PDF URL.");
+				return;
+			}
 
-							new Notice(
-								`Paper import failed: ${
-									error && error.message ? error.message : String(error)
-								}`
-							);
+			try {
+				importButton.disabled = true;
+				importButton.setText("Importing...");
+				await this.onSubmit(url);
+				this.close();
+			} catch (error) {
+				console.error(
+					"paper-organization: failed to import paper",
+					error
+				);
 
-							button.setDisabled(false);
-							button.setButtonText("Import");
-						}
-					});
-			});
+				new Notice(
+					`Paper import failed: ${
+						error && error.message ? error.message : String(error)
+					}`
+				);
+
+				importButton.disabled = false;
+				importButton.setText("Import");
+			}
+		});
 	}
 
 	onClose() {
+		this.modalEl.removeClass("paper-import-modal-container");
+		this.contentEl.removeClass("paper-import-modal");
 		this.contentEl.empty();
 	}
 }
@@ -5127,7 +4397,6 @@ class PaperBatchImportModal extends Modal {
 		this.plugin = plugin;
 		this.onSubmit = onSubmit;
 		this.pdfUrls = "";
-		this.downloadPdf = false;
 	}
 
 	onOpen() {
@@ -5170,17 +4439,6 @@ class PaperBatchImportModal extends Modal {
 		});
 		helper.setText("Duplicate URLs are ignored. Invalid URLs are skipped before import starts.");
 
-		new Setting(contentEl)
-			.setName("Download PDFs locally")
-			.setDesc(
-				"When enabled, each PDF will be saved to the configured PDF folder and linked in the pdf field."
-			)
-			.addToggle((toggle) => {
-				toggle.setValue(this.downloadPdf).onChange((value) => {
-					this.downloadPdf = value;
-				});
-			});
-
 		const preview = contentEl.createDiv({
 			cls: "paper-organization-batch-preview",
 		});
@@ -5218,7 +4476,7 @@ class PaperBatchImportModal extends Modal {
 							button.setButtonText(`Importing 0/${urls.length}...`);
 
 							let completed = 0;
-							const result = await this.onSubmit(urls, this.downloadPdf, () => {
+							const result = await this.onSubmit(urls, () => {
 								completed += 1;
 								button.setButtonText(`Importing ${completed}/${urls.length}...`);
 							});
@@ -5236,7 +4494,7 @@ class PaperBatchImportModal extends Modal {
 							button.setButtonText("Retry Failed");
 						} catch (error) {
 							console.error(
-								"treasure-hub: failed to batch import papers",
+								"paper-organization: failed to batch import papers",
 								error
 							);
 
@@ -5290,7 +4548,7 @@ class PaperBatchImportModal extends Modal {
 	}
 }
 
-class TreasureHubSettingTab extends PluginSettingTab {
+class PaperOrganizationSettingTab extends PluginSettingTab {
 	constructor(app, plugin) {
 		super(app, plugin);
 		this.plugin = plugin;
@@ -5310,7 +4568,7 @@ class TreasureHubSettingTab extends PluginSettingTab {
 		});
 
 		heroText.createDiv({
-			text: "Treasure Hub",
+			text: "Paper Organization",
 			cls: "paper-settings-eyebrow",
 		});
 
@@ -5320,7 +4578,7 @@ class TreasureHubSettingTab extends PluginSettingTab {
 		});
 
 		heroText.createDiv({
-			text: "Manage paper import paths, library display, settings backup, and Markdown-based dashboard styles.",
+			text: "Manage paper import paths, library display, and plugin-folder custom dashboard styles.",
 			cls: "paper-settings-subtitle",
 		});
 
@@ -5389,7 +4647,7 @@ class TreasureHubSettingTab extends PluginSettingTab {
 			eyebrow: "Dashboard",
 			title: "Main page display",
 			description:
-				"Control which modules are shown on the Treasure Hub main page.",
+				"Control which modules are shown on the Paper Organization main page.",
 		});
 
 		const overviewSetting = new Setting(dashboardSection)
@@ -5435,41 +4693,11 @@ class TreasureHubSettingTab extends PluginSettingTab {
 
 		imageSetting.settingEl.addClass("paper-settings-row");
 
-		const backupSection = this.createSettingsSection(containerEl, {
-			eyebrow: "Backup",
-			title: "Settings import/export",
-			description:
-				"Copy plugin settings as clipboard JSON, paste a previous JSON export, or use JSON files as a fallback. Theme notes themselves are not embedded; only their folder and active path are saved.",
-		});
-
-		this.renderSettingsImportExport(backupSection);
-
 		const styleSection = this.createSettingsSection(containerEl, {
 			eyebrow: "Appearance",
 			title: "Dashboard style",
 			description:
-				"Use Original, or select a Markdown note in a vault folder. Each theme note can contain one or more fenced ```css code blocks.",
-		});
-
-		this.addTextSetting(styleSection, {
-			name: "Markdown theme folder",
-			desc:
-				"Vault-relative folder containing .md theme notes with fenced ```css code blocks. Example: Treasure Hub/Themes.",
-			placeholder: DEFAULT_SETTINGS.customStyleFolderPath,
-			value: this.plugin.getCustomStyleFolderPath(),
-			onChange: async (value) => {
-				try {
-					await this.plugin.setCustomStyleFolderPath(
-						value.trim() || DEFAULT_SETTINGS.customStyleFolderPath
-					);
-				} catch (error) {
-					new Notice(
-						`Invalid theme folder path: ${
-							error && error.message ? error.message : String(error)
-						}`
-					);
-				}
-			},
+				"Use Original, or import a CSS file into the fixed plugin style folder and enable exactly one custom style at a time.",
 		});
 
 		this.renderStyleSettings(styleSection);
@@ -5519,115 +4747,6 @@ class TreasureHubSettingTab extends PluginSettingTab {
 		return setting;
 	}
 
-	renderSettingsImportExport(section) {
-		const fileInput = section.createEl("input");
-		fileInput.type = "file";
-		fileInput.accept = ".json,application/json,text/plain";
-		fileInput.addClass("paper-style-file-input");
-
-		fileInput.onchange = async () => {
-			const selectedFile = fileInput.files && fileInput.files[0];
-			if (!selectedFile) return;
-
-			try {
-				const result = await this.plugin.importSettingsFromFile(selectedFile);
-				new Notice(
-					result.activeStyleMissing
-						? "Settings imported. Active Markdown theme is missing in this vault, so Original is being shown until the theme note exists."
-						: "Treasure Hub settings imported."
-				);
-				this.display();
-			} catch (error) {
-				console.error("treasure-hub: failed to import settings", error);
-				new Notice(
-					`Failed to import settings: ${
-						error && error.message ? error.message : String(error)
-					}`
-				);
-			} finally {
-				fileInput.value = "";
-			}
-		};
-
-		const summary = section.createDiv({
-			cls: "paper-style-summary paper-settings-clipboard-summary",
-		});
-
-		const summaryMain = summary.createDiv({
-			cls: "paper-style-summary-main",
-		});
-
-		summaryMain.createDiv({
-			cls: "paper-style-summary-icon",
-			text: "⇄",
-		});
-
-		const summaryBody = summaryMain.createDiv({
-			cls: "paper-style-summary-body",
-		});
-
-		summaryBody.createDiv({
-			text: "Clipboard settings JSON",
-			cls: "paper-style-summary-title",
-		});
-
-		summaryBody.createDiv({
-			text:
-				"Copy the current plugin settings as JSON, or paste a previous JSON export to import it. Theme notes themselves are not embedded; only their folder and active path are saved.",
-			cls: "paper-style-summary-desc",
-		});
-
-		const summaryActions = summary.createDiv({
-			cls: "paper-style-summary-actions",
-		});
-
-		this.createToolbarButton(summaryActions, "Copy JSON", "mod-cta", async () => {
-			await this.plugin.exportSettingsToClipboard();
-		});
-
-		this.createToolbarButton(summaryActions, "Paste JSON", "", () => {
-			new PaperSettingsJsonImportModal(this.app, this.plugin, async (jsonText) => {
-				return await this.plugin.importSettingsFromJsonText(jsonText, {
-					sourceName: "pasted JSON",
-				});
-			}, () => this.display()).open();
-		});
-
-		const schemaRow = section.createDiv({
-			cls: "paper-settings-export-schema-row",
-		});
-
-		const location = schemaRow.createDiv({
-			cls: "paper-style-location paper-settings-export-schema-location",
-		});
-
-		location.createDiv({
-			text: "Export schema",
-			cls: "paper-style-location-label",
-		});
-
-		location.createDiv({
-			text: `v${SETTINGS_EXPORT_SCHEMA_VERSION} · plugin ${
-				this.plugin.manifest && this.plugin.manifest.version
-					? this.plugin.manifest.version
-					: ""
-			}`,
-			cls: "paper-style-location-path",
-		});
-
-		const fileRow = schemaRow.createDiv({
-			cls: "paper-settings-secondary-actions paper-settings-secondary-actions-inline",
-		});
-
-		this.createToolbarButton(fileRow, "Download JSON file", "", () => {
-			this.plugin.exportSettingsToFile();
-		});
-
-		this.createToolbarButton(fileRow, "Import JSON file", "", () => {
-			fileInput.click();
-		});
-	}
-
 	renderStyleSettings(section) {
 		const activeStylePath = this.plugin.settings.activeStylePath || STYLE_ORIGINAL;
 		const customFiles = this.plugin.getCustomStyleFiles();
@@ -5636,7 +4755,7 @@ class TreasureHubSettingTab extends PluginSettingTab {
 
 		const fileInput = section.createEl("input");
 		fileInput.type = "file";
-		fileInput.accept = ".css,.md,text/css,text/markdown,text/plain";
+		fileInput.accept = ".css,text/css";
 		fileInput.addClass("paper-style-file-input");
 
 		fileInput.onchange = async () => {
@@ -5648,9 +4767,9 @@ class TreasureHubSettingTab extends PluginSettingTab {
 				new Notice(`Imported and enabled: ${selectedFile.name}`);
 				this.display();
 			} catch (error) {
-				console.error("treasure-hub: failed to import Markdown style", error);
+				console.error("paper-organization: failed to import custom style", error);
 				new Notice(
-					`Failed to import style: ${
+					`Failed to import CSS: ${
 						error && error.message ? error.message : String(error)
 					}`
 				);
@@ -5686,9 +4805,9 @@ class TreasureHubSettingTab extends PluginSettingTab {
 		summaryBody.createDiv({
 			text:
 				activeStylePath === STYLE_ORIGINAL
-					? "Using the built-in Treasure Hub style injected by the plugin."
+					? "Using the built-in plugin stylesheet only."
 					: activeMissing
-						? "The selected Markdown theme note cannot be found in the theme folder, or it has no fenced ```css code block. The dashboard is currently falling back to Original style."
+						? "The selected CSS file cannot be found in the fixed plugin style folder. The dashboard is currently falling back to original styles."
 						: `Loaded from ${activeFile.path}`,
 			cls: "paper-style-summary-desc",
 		});
@@ -5697,13 +4816,8 @@ class TreasureHubSettingTab extends PluginSettingTab {
 			cls: "paper-style-summary-actions",
 		});
 
-		this.createToolbarButton(summaryActions, "Import CSS/MD", "mod-cta", () => {
+		this.createToolbarButton(summaryActions, "Import CSS", "mod-cta", () => {
 			fileInput.click();
-		});
-
-		this.createToolbarButton(summaryActions, "Create sample", "", async () => {
-			await this.plugin.createSampleCustomStyleNote();
-			this.display();
 		});
 
 		this.createToolbarButton(summaryActions, "Refresh list", "", async () => {
@@ -5716,7 +4830,7 @@ class TreasureHubSettingTab extends PluginSettingTab {
 		});
 
 		location.createDiv({
-			text: "Markdown theme folder",
+			text: "Fixed style folder",
 			cls: "paper-style-location-label",
 		});
 
@@ -5751,13 +4865,13 @@ class TreasureHubSettingTab extends PluginSettingTab {
 			});
 
 			empty.createDiv({
-				text: "No Markdown theme notes with CSS code blocks found yet.",
+				text: "No custom CSS files found yet.",
 				cls: "paper-style-empty-title",
 			});
 
 			empty.createDiv({
 				text:
-					"Create or move a .md file into the theme folder, add a fenced ```css code block, then tap Refresh list. You can also tap Create sample.",
+					"Use Import CSS to copy a .css file into the fixed plugin style folder and enable it automatically.",
 				cls: "paper-style-empty-desc",
 			});
 		} else {
@@ -5802,7 +4916,7 @@ class TreasureHubSettingTab extends PluginSettingTab {
 		});
 
 		main.createDiv({
-			text: "Built-in dashboard style injected only when Original is active.",
+			text: "Built-in dashboard style from styles.css.",
 			cls: "paper-style-card-path",
 		});
 
@@ -5848,11 +4962,7 @@ class TreasureHubSettingTab extends PluginSettingTab {
 		});
 
 		meta.createSpan({
-			text: `${file.cssBlockCount || 0} CSS block${file.cssBlockCount === 1 ? "" : "s"}`,
-		});
-
-		meta.createSpan({
-			text: `${Math.max(0.1, (file.cssSize || file.stat.size) / 1024).toFixed(1)} KB CSS`,
+			text: `${Math.max(0.1, file.stat.size / 1024).toFixed(1)} KB`,
 		});
 
 		meta.createSpan({
@@ -6128,81 +5238,6 @@ function formatDateTime(timestamp) {
 	return `${year}-${month}-${day} ${hour}:${minute}`;
 }
 
-function formatDateForFileName(timestamp) {
-	const date = new Date(timestamp || Date.now());
-
-	if (Number.isNaN(date.getTime())) {
-		return "unknown-date";
-	}
-
-	const year = date.getFullYear();
-	const month = String(date.getMonth() + 1).padStart(2, "0");
-	const day = String(date.getDate()).padStart(2, "0");
-	const hour = String(date.getHours()).padStart(2, "0");
-	const minute = String(date.getMinutes()).padStart(2, "0");
-
-	return `${year}-${month}-${day}-${hour}${minute}`;
-}
-
-
-async function copyTextToClipboard(text) {
-	const value = String(text || "");
-
-	try {
-		if (navigator && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-			await navigator.clipboard.writeText(value);
-			return true;
-		}
-	} catch (error) {
-		console.warn("treasure-hub: navigator.clipboard.writeText failed", error);
-	}
-
-	try {
-		const textarea = document.createElement("textarea");
-		textarea.value = value;
-		textarea.setAttribute("readonly", "readonly");
-		textarea.style.position = "fixed";
-		textarea.style.left = "-9999px";
-		textarea.style.top = "0";
-		document.body.appendChild(textarea);
-		textarea.focus();
-		textarea.select();
-		const success = document.execCommand && document.execCommand("copy");
-		textarea.remove();
-		return !!success;
-	} catch (error) {
-		console.warn("treasure-hub: fallback clipboard copy failed", error);
-		return false;
-	}
-}
-
-async function readTextFromClipboard() {
-	if (navigator && navigator.clipboard && typeof navigator.clipboard.readText === "function") {
-		return await navigator.clipboard.readText();
-	}
-
-	return "";
-}
-
-function downloadTextFile(filename, text, mimeType = "text/plain") {
-	const blob = new Blob([String(text || "")], {
-		type: `${mimeType};charset=utf-8`,
-	});
-	const url = URL.createObjectURL(blob);
-	const anchor = document.createElement("a");
-
-	anchor.href = url;
-	anchor.download = filename || "download.txt";
-	anchor.style.display = "none";
-	document.body.appendChild(anchor);
-	anchor.click();
-	anchor.remove();
-
-	window.setTimeout(() => {
-		URL.revokeObjectURL(url);
-	}, 1000);
-}
-
 async function readBrowserFileAsText(file) {
 	if (file && typeof file.text === "function") {
 		return await file.text();
@@ -6215,35 +5250,6 @@ async function readBrowserFileAsText(file) {
 		reader.onerror = () => reject(reader.error || new Error("Failed to read file."));
 		reader.readAsText(file);
 	});
-}
-
-function extractCssCodeBlocks(markdown) {
-	const source = String(markdown || "").replace(/\r\n?/g, "\n");
-	const blocks = [];
-	const pattern = /(?:^|\n)(`{3,}|~{3,})[ \t]*css\b[^\n]*\n([\s\S]*?)\n\1[ \t]*(?=\n|$)/gi;
-	let match;
-
-	while ((match = pattern.exec(source)) !== null) {
-		const css = String(match[2] || "").trim();
-
-		if (css) {
-			blocks.push(css);
-		}
-	}
-
-	return blocks;
-}
-
-function buildCssFromMarkdownStyleNote(path, markdown) {
-	const blocks = extractCssCodeBlocks(markdown);
-
-	if (blocks.length === 0) {
-		throw new Error("No fenced ```css code block found in the selected Markdown style note.");
-	}
-
-	return blocks
-		.map((css, index) => `/* CSS block ${index + 1} from ${path} */\n${css}`)
-		.join("\n\n");
 }
 
 function sortedMapEntries(map) {
@@ -6537,7 +5543,7 @@ async function fetchArxivMetadata(arxivId) {
 		}
 	} catch (error) {
 		console.warn(
-			"treasure-hub: arXiv API metadata request failed; trying arXiv abs page fallback.",
+			"paper-organization: arXiv API metadata request failed; trying arXiv abs page fallback.",
 			error
 		);
 	}
@@ -6995,7 +6001,14 @@ function buildOrderedFrontmatter(data) {
 
 	pushYamlArray(lines, "authors", normalizeAuthors(data.authors || []));
 	pushYamlArray(lines, "labs", normalizeStringArray(data.labs || []));
-	pushYamlStringOrBlank(lines, "affiliation", data.affiliation || "");
+	pushYamlArray(
+		lines,
+		"affiliation",
+		normalizeStringArray([
+			...asArray(data.affiliation),
+			...asArray(data.affiliations),
+		])
+	);
 
 	lines.push(`arxiv: ${yamlString(data.arxiv || "")}`);
 	lines.push(`pdf_url: ${yamlString(data.pdf_url || "")}`);
